@@ -19,15 +19,18 @@ func (cb *CacheBlock) Get(id string) *Block {
 	return cb.blockMap[id]
 }
 
-func (cb *CacheBlock) GetOrSet(id string, fn func() *Block) *Block {
+func (cb *CacheBlock) GetOrSet(id string, fn func() (*Block, error)) (*Block, error) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	if _, ok := cb.blockMap[id]; ok {
-		return cb.blockMap[id]
+		return cb.blockMap[id], nil
 	}
-	block := fn()
+	block, err := fn()
+	if err != nil {
+		return nil, err
+	}
 	cb.blockMap[id] = block
-	return block
+	return block, nil
 }
 
 func (cb *CacheBlock) Exists(id string) bool {

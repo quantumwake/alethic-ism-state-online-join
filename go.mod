@@ -1,15 +1,15 @@
 module alethic-ism-state-online-join
 
-go 1.22.0
-
-toolchain go1.22.4
+go 1.24.1
 
 require (
 	github.com/nats-io/nats.go v1.39.1
-	github.com/quantumwake/alethic-ism-core-go v0.0.0-20250317225008-7fef1fd3bccc
+	github.com/quantumwake/alethic-ism-core-go v0.0.0-20250323143121-8cd4903338ca
+	github.com/stretchr/testify v1.9.0
 )
 
 require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a // indirect
@@ -20,6 +20,7 @@ require (
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/nats-io/nkeys v0.4.9 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect

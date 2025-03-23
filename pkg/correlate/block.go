@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"fmt"
 	"github.com/quantumwake/alethic-ism-core-go/pkg/data/models"
+	"github.com/quantumwake/alethic-ism-core-go/pkg/repository/state"
 	"log"
 	"sync"
 	"time"
@@ -12,7 +13,7 @@ import (
 // Block is the upper-level structure that defines key fields,
 // holds data blocks, and performs join and eviction.
 type Block struct {
-	keyFields []string // fields defining the correlation key
+	KeyDefinitions state.ColumnKeyDefinitions // fields defining the correlation key
 
 	// stop watch for measuring performance of the block
 	Statistics *Statistics
@@ -31,9 +32,9 @@ type Block struct {
 }
 
 // NewBlock creates a new Block.
-func NewBlock(keyFields []string, softMaxThreshold int, softWindow, hardWindow time.Duration) *Block {
+func NewBlock(keyDefinitions state.ColumnKeyDefinitions, softMaxThreshold int, softWindow, hardWindow time.Duration) *Block {
 	cb := &Block{
-		keyFields:        keyFields,
+		KeyDefinitions:   keyDefinitions,
 		dataBlocks:       make(map[string]*DataBlock),
 		heap:             DataBlockHeap{},
 		softMaxThreshold: softMaxThreshold,
@@ -46,13 +47,13 @@ func NewBlock(keyFields []string, softMaxThreshold int, softWindow, hardWindow t
 	return cb
 }
 
-// getKey builds a unique key for an event based on the block's keyFields.
+// getKey builds a unique key for an event based on the block's KeyDefinitions.
 func (cb *Block) getKey(event models.Data) (string, error) {
 	key := ""
-	for _, field := range cb.keyFields {
-		value, ok := event[field]
+	for _, field := range cb.KeyDefinitions {
+		value, ok := event[field.Name]
 		if !ok {
-			return "", fmt.Errorf("field %s not present in event", field)
+			return "", fmt.Errorf("field `%s` not present in event", field.Name)
 		}
 		key += fmt.Sprintf("%v|", value)
 	}
@@ -61,21 +62,22 @@ func (cb *Block) getKey(event models.Data) (string, error) {
 
 // joinData joins two events from different sources.
 // The key fields are copied as-is, and non-key fields are prefixed with the source identifier.
-func joinData(src1 string, e1 models.Data, src2 string, e2 models.Data, keyFields []string) models.Data {
+func joinData(src1 string, e1 models.Data, src2 string, e2 models.Data, keyDefinitions state.ColumnKeyDefinitions) models.Data {
 	result := make(models.Data)
 	// Copy key fields from one event (assumed identical in both)
-	for _, field := range keyFields {
-		if v, ok := e1[field]; ok {
-			result[field] = v
+	for _, field := range keyDefinitions {
+		if v, ok := e1[field.Name]; ok {
+			result[field.Name] = v
 		}
 	}
+
 	// Helper to add non-key fields with source prefix.
 	addFields := func(src string, e models.Data) {
 		for k, v := range e {
 			// Skip key fields.
 			skip := false
-			for _, field := range keyFields {
-				if k == field {
+			for _, field := range keyDefinitions {
+				if k == field.Name {
 					skip = true
 					break
 				}
@@ -83,7 +85,12 @@ func joinData(src1 string, e1 models.Data, src2 string, e2 models.Data, keyField
 			if skip {
 				continue
 			}
-			result[fmt.Sprintf("%s_%s", src, k)] = v
+			//result[fmt.Sprintf("%s_%s", src, k)] = v
+
+			// TODO this is where the new field is created that isn't a key, we need a better way to derive the fields, maybe use the remap definitions?
+			//  ALTERNATIVELY: we can do same_1 same_2 if there are duplicates?
+			result[fmt.Sprintf("%s", k)] = v
+
 		}
 	}
 	addFields(src1, e1)
@@ -93,7 +100,7 @@ func joinData(src1 string, e1 models.Data, src2 string, e2 models.Data, keyField
 }
 
 // AddData processes an incoming event from a given source. It only joins events from different sources.
-func (cb *Block) AddData(source string, data models.Data) {
+func (cb *Block) AddData(source string, data models.Data, callback func(data models.Data) error) error {
 	stopWatch := NewStopWatch().Start()
 	defer func() { // calculate execution time and add lab statistics
 		elapsed := stopWatch.Stop().Elapsed()
@@ -105,8 +112,7 @@ func (cb *Block) AddData(source string, data models.Data) {
 
 	key, err := cb.getKey(data)
 	if err != nil {
-		log.Printf("Error extracting key: %v", err)
-		return
+		return fmt.Errorf("could not get key for data %v: %v", data, err)
 	}
 	now := time.Now()
 	db, exists := cb.dataBlocks[key]
@@ -133,11 +139,11 @@ func (cb *Block) AddData(source string, data models.Data) {
 		avg := time.Duration(cb.Statistics.Avg()).Seconds()
 
 		for _, otherEvent := range events {
-			joinResult := joinData(otherSource, otherEvent, source, data, cb.keyFields)
+			joinResult := joinData(otherSource, otherEvent, source, data, cb.KeyDefinitions)
 			log.Printf("\t%.10f\t%+v\n", avg, joinResult)
-
-			//log.Printf("[%s]\tjoined output for key %s: %+v", avg, key, joinResult)
-			//log.Printf("[%s]\tjoined output for key %s: %+v", avg, key, joinResult)
+			if err = callback(joinResult); err != nil {
+				return fmt.Errorf("could not process data: %v", err)
+			}
 		}
 	}
 
@@ -149,7 +155,7 @@ func (cb *Block) AddData(source string, data models.Data) {
 	// Always reset the eviction time on each new event.
 	db.evictionTime = now.Add(cb.softEvictWindow)
 	heap.Fix(&cb.heap, db.index)
-
+	return nil
 }
 
 // evictionLoop runs periodically to remove stale data blocks.

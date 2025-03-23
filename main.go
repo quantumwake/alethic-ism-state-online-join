@@ -30,94 +30,8 @@ var (
 
 	blockCache    = correlate.NewCacheBlock()
 	routingConfig *config.Config
+	//logger = slog.New(slog.NewTextHandler(os.Stdout, utils.StringFromEnvWithDefault("LOG_LEVEL", "DEBUG")))
 )
-
-func handleQueryState(routeMsg models.RouteMessage, queryState map[string]interface{}) {
-	//if queryState == nil {
-	//	log.Printf("Error: query state not found in message")
-	//	return
-	//}
-	//
-	//// we need to check the dictionary for the binding key and its value
-	////value, ok := jsonMsg["__composite_key__"]
-	//compositeKey, ok := queryState["__composite_key__"]
-	//if !ok {
-	//	// TODO send to monitor error
-	//	log.Printf("Error: composition key not found in message")
-	//	return // we need to return here because we cannot process the message without the binding key
-	//}
-	//key := compositeKey.(string)
-	//
-	//// store the message in the message store and get the message back.
-	//// the first message is SourceData1 and the second will become SourceData2
-	//message, err := messageStore.StoreMessage(key, &queryState)
-	//if err != nil {
-	//	handleError(routeMsg, context.Background(), err)
-	//}
-	//
-	//// both messages have been set then we can now merge and the messages together
-	//if message.SourceData1 != nil && message.SourceData2 != nil {
-	//
-	//	//updateRouteStatus(routeMsg.RouteID, data.Running, context.Background())
-	//
-	//	// remove the message regardless of the outcome, TODO error handling and reporting needs to be improved
-	//	defer messageStore.RemoveMessage(key)
-	//
-	//	// merge the two messages together
-	//	mergedSources, err := utils.ListDifferenceMerge(*message.SourceData1, *message.SourceData2)
-	//	if err != nil {
-	//		handleError(routeMsg, context.Background(), err)
-	//	}
-	//
-	//	// determine the processor id such that we can get the output state ids for the processor
-	//	routeOn, err := dataAccess.FindRouteByID(routeMsg.RouteID)
-	//	if err != nil {
-	//		handleError(routeMsg, context.Background(), fmt.Errorf("error, no route found for route id %v, err: %v", routeMsg.RouteID, err))
-	//	}
-	//
-	//	// get the output states for the processor, for each output state we need to send the merged sources to its connected processor
-	//	outputStateRoutes, err := dataAccess.FindRouteByProcessorAndDirection(routeOn.ProcessorID, model.DirectionOutput)
-	//	if err != nil {
-	//		handleError(routeMsg, context.Background(), fmt.Errorf("error, no output states found for current processor: %v", err))
-	//		return
-	//	}
-	//
-	//	// TODO PERFORMANCE/CAPACITY/LOAD: we can probably batch these and have a send channel where we can batch the messages together
-	//	for _, outputStateRoute := range outputStateRoutes {
-	//
-	//		// each output state route will contain a state id, this state id is used to find which routes we need to send the merged sources to
-	//		outputRoutes, err := dataAccess.FindRouteByStateAndDirection(outputStateRoute.StateID, model.DirectionInput)
-	//		if err != nil {
-	//			handleError(routeMsg, context.Background(), fmt.Errorf("error finding output routes for state id: %v, err: %v", outputStateRoute.StateID, err))
-	//			continue
-	//		}
-	//
-	//		// we update the route between this processor and the output state id
-	//		updateRouteStatus(outputStateRoute.ID, data.Completed, context.Background())
-	//
-	//		// now we iterate each of the state routes and send the merged sources to the connected processor
-	//		for _, outputRoute := range outputRoutes {
-	//			hopRouteMsg := data.RouteMessage{
-	//				Type:       data.QueryStateEntry,
-	//				RouteID:    outputRoute.ID,
-	//				QueryState: []map[string]interface{}{mergedSources}, // TODO right now we only output one at a time, despite taking in multiple values
-	//			}
-	//			// TODO context.TODO() is a placeholder, we need to determine the context for the message
-	//			err := natsRouteStateRouter.Publish(context.TODO(), hopRouteMsg)
-	//			if err != nil {
-	//				handleError(hopRouteMsg, context.Background(), fmt.Errorf("error publishing message: %v", err))
-	//				continue
-	//			}
-	//		}
-	//
-	//		// send the merged sources to the state router
-	//		sendStateSyncMessage(outputStateRoute.ID, []map[string]interface{}{
-	//			mergedSources,
-	//		}, context.Background())
-	//	}
-	//
-	//}
-}
 
 func onMessageReceived(ctx context.Context, route *routing.NATSRoute, msg *nats.Msg) {
 	defer func(msg *nats.Msg, opts ...nats.AckOpt) {
@@ -151,49 +65,72 @@ func onMessageReceived(ctx context.Context, route *routing.NATSRoute, msg *nats.
 		}
 	}()
 
-	// Use "id" as the correlation key field.
-	keyFields := []string{"id"}
+	// Use "psIn" as the correlation key field.
+	//keyFields := []string{"psIn"}
 	softMaxThreshold := 10
 	softWindow := 10 * time.Second
 	hardWindow := 30 * time.Second
 
 	// TODO IMPORTANT needs to be cached.
-	id, err := routeBackend.FindRouteByID(routeMsg.RouteID)
+	// give the route the data was received on, pull the route information such that we can identify the processor id
+	psIn, err := routeBackend.FindRouteByID(routeMsg.RouteID)
 	if err != nil {
 		return
 	}
 
-	processorOutputs, err := routeBackend.FindRouteByProcessorAndDirection(id.ProcessorID, processor.DirectionOutput)
+	// TODO IMPORTANT needs to be cached.
+	// given the processor id the data is destined for, find all output routes such that we can iterate each output and write it separately.
+	psOuts, err := routeBackend.FindRouteByProcessorAndDirection(psIn.ProcessorID, processor.DirectionOutput)
 	if err != nil {
-		log.Printf("error finding output states for processor: %v, err: %v", id.ProcessorID, err)
+		log.Printf("error finding output states for processor: %v, err: %v", psIn.ProcessorID, err)
 		PublishRouteStatus(ctx, routeMsg.RouteID, processor.Failed, err.Error(), msg.Data)
-		// TODO probably should not try and process this over and over again if its the same block id that is failing
+		// TODO probably should not try and process this over and over again if its the same block psIn that is failing
 		return
-	}
-
-	for _, processorOutput := range processorOutputs {
-		outputState, err := backendState.FindStateFull(processorOutput.StateID, state.StateLoadBasic|state.StateLoadConfigKeyDefinitions)
-		if err != nil {
-			log.Printf("error finding state: %v, err: %v", processorOutput.StateID, err)
-			PublishRouteStatus(ctx, routeMsg.RouteID, processor.Failed, err.Error(), msg.Data)
-			return
-		}
-
-		fmt.Println(outputState)
 	}
 
 	// get the block from the cache or create a new block if it doesn't exist
 	// TODO in a distributed environment we need to have a distributed cache or
 	//  somehow ensure that the block is always consumed by the same instance,
 	//  while still maintaining a global cache, in the event of a L2 cache miss
-	block := blockCache.GetOrSet(id.ID, func() *correlate.Block {
-		return correlate.NewBlock(keyFields, softMaxThreshold, softWindow, hardWindow)
-	})
 
-	// add the the query state rows to the block (given processor id it is executing on)
-	// TODO IMPORTANT if we want to distribute this, we need to have a distributed cache of sorts
-	for _, queryState := range routeMsg.QueryState {
-		block.AddData(routeMsg.RouteID, queryState)
+	// for each of the processors output, create a new sliding window cache block
+	for _, psOut := range psOuts {
+
+		// get or create a sliding window cache block for each output state such that we can track inbound data and join them by the output primary key definition
+		var block *correlate.Block
+		block, err = blockCache.GetOrSet(psOut.ID, func() (*correlate.Block, error) {
+			// fetch the key definitions such that we can join the data on that primary keys defined in the state output
+			var outputState *state.State
+			outputState, err = backendState.FindStateFull(psOut.StateID, state.StateLoadBasic|state.StateLoadConfigKeyDefinitions)
+			if err != nil {
+				return nil, err
+			}
+
+			// pull the primary keys
+			joinKeys := outputState.Config.GetKeyDefinitionsByType(state.DefinitionStateJoinKey)
+			if joinKeys == nil {
+				return nil, fmt.Errorf("no join keys defined for state '%s'", psOut.StateID)
+			}
+
+			return correlate.NewBlock(joinKeys, softMaxThreshold, softWindow, hardWindow), nil
+		})
+
+		// if there is an error publish and move on
+		if err != nil {
+			PublishRouteStatus(ctx, routeMsg.RouteID, processor.Failed, err.Error(), msg.Data)
+			continue
+		}
+
+		// add the the query state rows to the block (given processor psIn it is executing on)
+		// TODO IMPORTANT if we want to distribute this, we need to have a distributed cache of sorts
+		for _, queryState := range routeMsg.QueryState {
+			if err = block.AddData(routeMsg.RouteID, queryState, func(data models.Data) error {
+				PublishStateSync(ctx, psOut.ID, []models.Data{data})
+				return nil
+			}); err != nil {
+				PublishRouteStatus(ctx, routeMsg.RouteID, processor.Failed, err.Error(), msg.Data)
+			}
+		}
 	}
 
 	//states, _ := routeBackend.FindRouteByProcessorAndDirection(processorID, processor_state.DirectionOutput)
@@ -239,7 +176,7 @@ func PublishRouteStatus(ctx context.Context, routeID string, status processor.Pr
 	}
 }
 
-func sendStateSyncMessage(routeID string, queryState []models.Data, ctx context.Context) {
+func PublishStateSync(ctx context.Context, routeID string, queryState []models.Data) {
 	syncMessage := models.RouteMessage{
 		Type:       models.QueryStateRoute,
 		RouteID:    routeID,

@@ -1,0 +1,7 @@
+scenario_id,scenario,category,framework
+ABC_01,1. some specific scenario that needs to be matched against utilitarian,class_a,Utilitarian
+ABC_02,2. some specific scenario that needs to be matched against utilitarian,class_a,Utilitarian
+ABC_03,3. some specific scenario that needs to be matched against care ethicist,class_b,Care Ethicist
+DEF_01,1. some specific scenario that needs to be matched against care ethicis,class_b,Care Ethicist
+DEF_02,2. some specific scenario that needs to be matched against care ethicist,class_b,Care Ethicist
+DEF_03,3. some specific scenario that needs to be matched against utilitarian,class_a,Utilitarian
