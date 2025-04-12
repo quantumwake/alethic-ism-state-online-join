@@ -21,12 +21,11 @@ import (
 
 var (
 	natsRoute *routing.NATSRoute // the route we are listening on
-	//messageStore         *store.CorrelateBlock
-	natsRouteStateRouterV1 *routing.NATSRoute // route for routing state messages
-	natsRouteMonitor       *routing.NATSRoute // route for sending errors
-	natsRouteStateSync     *routing.NATSRoute // route for sending sync messages
-	backendState           = state.NewBackend(os.Getenv("DSN"))
-	routeBackend           = route.NewBackend(os.Getenv("DSN"))
+	//natsRouteStateRouterV1 *routing.NATSRoute // route for routing state messages
+	natsRouteMonitor   *routing.NATSRoute // route for sending errors
+	natsRouteStateSync *routing.NATSRoute // route for sending sync messages
+	backendState       = state.NewBackend(os.Getenv("DSN"))
+	routeBackend       = route.NewBackend(os.Getenv("DSN"))
 
 	blockCache    = correlate.NewCacheBlock()
 	routingConfig *config.Config
@@ -132,24 +131,6 @@ func onMessageReceived(ctx context.Context, route *routing.NATSRoute, msg *nats.
 			}
 		}
 	}
-
-	//states, _ := routeBackend.FindRouteByProcessorAndDirection(processorID, processor_state.DirectionOutput)
-	//
-	//for _, state := range states {
-	//
-	//	block := correlate.NewBlock("")
-	//}
-	//
-	//if routeMsg.QueryState == nil {
-	//	handleError(routeMsg, ctx, fmt.Errorf("error: query state not found in message"))
-	//	return
-	//}
-
-	// iterate over the query state entries and process them
-	//for _, qse := range routeMsg.QueryState {
-	//	handleQueryState(routeMsg, qse)
-	//}
-
 }
 
 func PublishRouteStatus(ctx context.Context, routeID string, status processor.ProcessorStatus, exception string, data interface{}) {
@@ -274,48 +255,10 @@ func main() {
 	// setup other require routes, monitor, state sync, state router
 	natsRouteMonitor = InitializeRouteWithCallback(ctx, "processor/monitor", nil)
 	natsRouteStateSync = InitializeRouteWithCallback(ctx, "processor/state/sync", nil)
-	natsRouteStateRouterV1 = InitializeRouteWithCallback(ctx, "processor/state/router", nil)
+	//natsRouteStateRouterV1 = InitializeRouteWithCallback(ctx, "processor/state/router", nil)
 
 	// set up process signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan // wait on signal
-
-	//
-	//// find the state router route
-	//stateRouter, err := routes.FindRouteBySelector("processor/state/router")
-	//if err != nil {
-	//	log.Fatalf("error finding state router route: %v", err)
-	//}
-	//natsRouteStateRouter = routing.NewNATSRoute(stateRouter)
-	//
-
-	//
-	//// connect to monitor route
-	//stateSyncRoute, err := routes.FindRouteBySelector("processor/state/sync")
-	//natsRouteStateSync = routing.NewNATSRoute(stateSyncRoute)
-	//err = natsRouteStateSync.Connect(ctx)
-	//if err != nil {
-	//	log.Fatalf("error connecting to state sync route: %v", err)
-	//}
-
-	// connect to usage database
-	//dsn, ok := os.LookupEnv("DSN")
-	//if !ok {
-	//	log.Fatalf("DSN environment variable not set")
-	//}
-	//dataAccess := data.NewDataAccess(dsn)
-
-	// TODO need to have graceful shutdown here
-	//select {}
-
-	//// Wait for termination signal
-	//<-sigChan
-	//log.Println("Received termination signal")
-	//
-	//// Cancel the context to stop the reconcile loop
-	//cancel()
-	//
-	//// Wait for the reconcile loop to finish
-	//<-store.RunningDone
 }
