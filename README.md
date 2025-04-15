@@ -1,4 +1,4 @@
-# alethic-ism-state-online-join
+# Alethic Instruction-Based State Machine (State Online Join Processor)
 
 Ability to join two or more state entries together to form a single state entry. 
 
