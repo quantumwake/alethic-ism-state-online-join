@@ -1,18 +1,25 @@
-name: Build Main
+name: Build and Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [ "main" ]
   pull_request:
-    branches: [main]
+    branches: [ "main" ]
 
 jobs:
   build-push-deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: quantumwake/alethic-ism-github-actions@main
+      - name: Checkout code
+        uses: actions/checkout@v3
         with:
+          fetch-depth: 0
+
+      - name: Build and Push Docker Image
+        uses: quantumwake/alethic-ism-github-actions@main
+        with:
+          # Required inputs
           image-name: 'krasaee/alethic-ism-state-online-join'
           registry-username: ${{ vars.DOCKERHUB_USERNAME }}
           registry-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          should-deploy: 'false'
+          registry: 'docker.io'
