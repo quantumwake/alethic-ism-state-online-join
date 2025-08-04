@@ -109,8 +109,8 @@ func MessageCallback(ctx context.Context, msg routing.MessageEnvelop) {
 	// Use "psIn" as the correlation key field.
 	//keyFields := []string{"psIn"}
 	softMaxThreshold := 10
-	softWindow := 10 * time.Second
-	hardWindow := 30 * time.Second
+	softWindow := 1 * time.Minute
+	hardWindow := 1 * time.Minute
 
 	// TODO IMPORTANT needs to be cached.
 	// give the route the data was received on, pull the route information such that we can identify the processor id

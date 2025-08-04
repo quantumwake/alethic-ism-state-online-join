@@ -27,6 +27,7 @@ type Block struct {
 
 	// Configuration thresholds:
 	softMaxThreshold int           // if total blocks exceed this, soft eviction is applied
+	eventTTL         time.Duration // TTL for individual events
 	softEvictWindow  time.Duration // each event resets evictionTime to now + softEvictWindow
 	hardEvictWindow  time.Duration // absolute lifetime of a data block
 }
@@ -38,12 +39,13 @@ func NewBlock(keyDefinitions state.ColumnKeyDefinitions, softMaxThreshold int, s
 		dataBlocks:       make(map[string]*DataBlock),
 		heap:             DataBlockHeap{},
 		softMaxThreshold: softMaxThreshold,
+		eventTTL:         softWindow, // Use softWindow as event TTL
 		softEvictWindow:  softWindow,
 		hardEvictWindow:  hardWindow,
 		Statistics:       NewStopWatch().Start(),
 	}
 	heap.Init(&cb.heap)
-	//go cb.evictionLoop()
+	go cb.evictionLoop()
 	return cb
 }
 
@@ -120,9 +122,10 @@ func (cb *Block) AddData(source string, data models.Data, callback func(data mod
 		// Create a new data block.
 		db = &DataBlock{
 			key:          key,
-			dataBySource: make(map[string][]models.Data),
+			dataBySource: make(DataBySource),
 			lastUpdated:  now,
 			evictionTime: now.Add(cb.softEvictWindow),
+			eventTTL:     cb.eventTTL,
 			count:        0,
 		}
 		cb.dataBlocks[key] = db
@@ -131,6 +134,14 @@ func (cb *Block) AddData(source string, data models.Data, callback func(data mod
 
 	// For each event already in the block from a different source, perform a join.
 	for otherSource, events := range db.dataBySource {
+		// Reset TTL for existing events, irrespective of its source
+		// As long as there is new data coming in on the join key value,
+		// we keep all data -- only when there is no longer any data on the
+		// same join key value do we evict the events for this join-key value
+		for _, event := range events {
+			event.Touch()
+		}
+
 		if otherSource == source {
 			continue // do not join events from the same source
 		}
@@ -138,8 +149,12 @@ func (cb *Block) AddData(source string, data models.Data, callback func(data mod
 		//avg := utils.FormatNanoSeconds(cb.Statistics.Avg())
 		avg := time.Duration(cb.Statistics.Avg()).Seconds()
 
-		for _, otherEvent := range events {
-			joinResult := joinData(otherSource, otherEvent, source, data, cb.KeyDefinitions)
+		for _, eventEntry := range events {
+			// Skip expired events
+			if now.Sub(eventEntry.LastAccessed) > cb.eventTTL {
+				continue
+			}
+			joinResult := joinData(otherSource, eventEntry.Data, source, data, cb.KeyDefinitions)
 			log.Printf("\t%.10f\t%+v\n", avg, joinResult)
 			if err = callback(joinResult); err != nil {
 				return fmt.Errorf("could not process data: %v", err)
@@ -147,12 +162,16 @@ func (cb *Block) AddData(source string, data models.Data, callback func(data mod
 		}
 	}
 
-	// Add the incoming event into the block.
-	db.dataBySource[source] = append(db.dataBySource[source], data)
+	// Create new event entry and add to the block
+	eventEntry := &EventEntry{
+		Data:         data,
+		LastAccessed: now,
+	}
+	db.dataBySource[source] = append(db.dataBySource[source], eventEntry)
 	db.count++
 	db.lastUpdated = now
 
-	// Always reset the eviction time on each new event.
+	// Always reset the block eviction time on each new event (from any source)
 	db.evictionTime = now.Add(cb.softEvictWindow)
 	heap.Fix(&cb.heap, db.index)
 	return nil

@@ -1,21 +1,24 @@
 package correlate
 
 import (
-	"github.com/quantumwake/alethic-ism-core-go/pkg/data/models"
 	"time"
 )
 
 // Data represents an incoming JSON event.
 //type Data map[string]interface{}
 
+type DataBySource map[string][]*EventEntry
+
 // DataBlock holds events joined by a common key, stored by source.
 type DataBlock struct {
 	key          string
-	dataBySource map[string][]models.Data // events organized by their source
-	lastUpdated  time.Time                // last update time
-	evictionTime time.Time                // updated on every event arrival
-	count        int                      // total events in this block
-	index        int                      // index in the heap
+	dataBySource DataBySource
+	//dataBySource map[string][]models.Data // events organized by their source
+	lastUpdated  time.Time // last update time
+	evictionTime time.Time // updated on every event arrival
+	eventTTL     time.Duration
+	count        int // total events in this block
+	index        int // index in the heap
 }
 
 // DataBlockHeap implements a min-heap sorted by evictionTime.

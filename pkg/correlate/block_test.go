@@ -138,8 +138,8 @@ func TestBlock_AddData(t *testing.T) {
 func TestBlock(t *testing.T) {
 	// Use "id" as the correlation key field.
 	softMaxThreshold := 10
-	softWindow := 10 * time.Second
-	hardWindow := 30 * time.Second
+	softWindow := 1 * time.Minute
+	hardWindow := 1 * time.Minute
 
 	keys := state.ColumnKeyDefinitions{
 		{Name: "id"},
