@@ -74,9 +74,9 @@ func TestBlockStore_AddData(t *testing.T) {
 
 	store := correlate.NewBlockStore(
 		keys,
-		10,            // blockCountSoftLimit
-		1,             // blockPartMaxJoinCount
-		5*time.Second, // blockWindowTTL
+		10,             // blockCountSoftLimit
+		1,              // blockPartMaxJoinCount
+		5*time.Second,  // blockWindowTTL
 		10*time.Second) // blockPartMaxAge
 
 	require.NoError(t, store.AddData("source1", source1[0], func(data models.Data) error {
