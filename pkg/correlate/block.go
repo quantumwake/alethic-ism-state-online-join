@@ -54,6 +54,9 @@ func NewBlockStore(keyDefinitions state.ColumnKeyDefinitions, blockCountSoftLimi
 		shutdownCh:            make(chan struct{}),
 		lastAccessed:          time.Now(),
 	}
+	
+	log.Print(LogBlockStoreCreated(keyDefinitions, blockCountSoftLimit, blockPartMaxJoinCount, blockWindowTTL, blockPartMaxAge))
+	
 	heap.Init(&store.heap)
 	go store.evictionLoop()
 	return store
@@ -148,6 +151,10 @@ func (store *BlockStore) GetOrAddBlock(joinKeyValue string) (*Block, error) {
 
 	store.blocks[joinKeyValue] = block
 	heap.Push(&store.heap, block)
+	
+	log.Print(LogNewBlockCreated(joinKeyValue, block.evictionTime, store.blockWindowTTL, 
+		len(store.blocks), store.blockCountSoftLimit))
+	
 	return block, nil
 }
 
@@ -186,6 +193,12 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 
 	// store the new inbound part
 	block.partsBySource[inboundSourceID] = append(block.partsBySource[inboundSourceID], inboundSourcePart)
+	
+	// Log the new part addition
+	existingParts := len(block.partsBySource[inboundSourceID]) - 1
+	totalSourcesInBlock := len(block.partsBySource)
+	log.Print(LogNewPartAdded(joinKeyValue, inboundSourceID, existingParts, totalSourcesInBlock,
+		inboundSourcePart.ExpireAt, store.blockPartMaxAge))
 
 	// under the block, we separate out the arrival data by source
 	// this allows us to join the received data (on source) against all other sources
@@ -194,10 +207,12 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 			continue // do not join events from the same source
 		}
 
-		//avg := utils.FormatNanoSeconds(store.Statistics.Avg())
-		avg := time.Duration(store.Statistics.Avg()).Seconds()
+		// avg is calculated inside LogJoinOperation function
+		// avg := time.Duration(store.Statistics.Avg()).Seconds()
 
 		write := 0                               // in-place compaction position
+		skippedExpired := 0
+		skippedMaxJoins := 0
 		for _, storedPart := range storedParts { /// iterate each stored part as per previously stored source
 			// Check if the part is expired (ExpireAt is in the past)
 			expired := storedPart.ExpireAt.Before(now)
@@ -207,6 +222,12 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 
 			// Skip this part if either condition is true
 			if expired || maxJoinsReached {
+				if expired {
+					skippedExpired++
+				}
+				if maxJoinsReached {
+					skippedMaxJoins++
+				}
 				continue // note, we do not move write heapIndex forward
 			}
 
@@ -221,12 +242,20 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 				inboundSourcePart,
 				store.JoinKeyDefinitions)
 
-			log.Printf("\t%.10f\t%+v\n", avg, joinResult)
+			log.Print(LogJoinOperation(joinKeyValue, store.JoinKeyDefinitions, joinResult,
+				storedSourceID, inboundSourceID, storedPart, inboundSourcePart,
+				store.blockPartMaxJoinCount, time.Duration(store.Statistics.Avg())))
 			if err = callback(joinResult); err != nil {
 				return fmt.Errorf("could not process availablePart: %v", err)
 			}
 
 			write++ // move write heapIndex forward
+		}
+
+		// Log if parts were skipped
+		if skippedExpired > 0 || skippedMaxJoins > 0 {
+			log.Print(LogPartSkipped(joinKeyValue, storedSourceID, skippedExpired, skippedMaxJoins, 
+				write, store.blockPartMaxAge, store.blockPartMaxJoinCount))
 		}
 
 		// now that we have iterated the storedParts and completed any relevant join, we need to compact the list, if any
@@ -247,9 +276,20 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 func (store *BlockStore) Shutdown() {
 	store.mu.Lock()
 	blockCount := len(store.blocks)
+	totalParts := 0
+	totalSources := 0
+	sourceMap := make(map[string]int)
+	
+	for _, block := range store.blocks {
+		for sourceID, parts := range block.partsBySource {
+			totalParts += len(parts)
+			sourceMap[sourceID] += len(parts)
+		}
+	}
+	totalSources = len(sourceMap)
 	store.mu.Unlock()
 	
-	log.Printf("[BlockStore] Shutting down store with %d active blocks", blockCount)
+	log.Print(LogBlockStoreShutdown(store.JoinKeyDefinitions, blockCount, totalParts, totalSources, store.Statistics))
 	close(store.shutdownCh)
 }
 
@@ -303,7 +343,9 @@ func (store *BlockStore) evictionLoop() {
 			if blk.evictionTime.Before(now) {
 				heap.Pop(&store.heap)
 				delete(store.blocks, blk.key)
-				log.Printf("Soft evicting block with key %s", blk.key)
+				
+				log.Print(LogBlockEviction("BlockStore", blk, store.JoinKeyDefinitions, 
+					len(store.blocks), store.blockCountSoftLimit))
 			} else {
 				break
 			}

@@ -242,9 +242,7 @@ func MessageCallback(ctx context.Context, msg routing.MessageEnvelop) {
 				return nil, fmt.Errorf("no join keys defined for state '%s'", psOut.StateID)
 			}
 
-			log.Printf("[Handler] Creating new BlockStore for route: %s (state: %s, processor: %s)",
-				psOut.ID, psOut.StateID, psIn.ProcessorID)
-			log.Printf("[Handler] BlockStore config - CountSoftLimit: %d, WindowTTL: %v, PartMaxJoinCount: %d, PartMaxAge: %v",
+			LogBlockStoreConfig(psOut.ID, psOut.StateID, psIn.ProcessorID, joinKeys,
 				config.BlockCountSoftLimit, blockWindowTTL, config.BlockPartMaxJoinCount, blockPartMaxAge)
 
 			return correlate.NewBlockStore(joinKeys,
@@ -262,13 +260,18 @@ func MessageCallback(ctx context.Context, msg routing.MessageEnvelop) {
 
 		// The input data needs to be added to the Block->BlockData[keyValue].DataBySource[source_route_id]
 		// TODO IMPORTANT if we want to distribute this, we need to have a distributed cache of sorts
-		for _, queryState := range ingestedRouteMsg.QueryState {
+		for idx, queryState := range ingestedRouteMsg.QueryState {
+			// Log the incoming data being processed
+			joinKeyValue, _ := store.GetJoinKeyValue(queryState)
+			log.Print(LogProcessingData(idx+1, len(ingestedRouteMsg.QueryState), 
+				ingestedRouteMsg.RouteID, psOut.ID, joinKeyValue))
 
 			// the route id defines the source to add the data to
 			if err = store.AddData(ingestedRouteMsg.RouteID, queryState, func(data models.Data) error {
 				PublishStateSync(ctx, psOut.ID, []models.Data{data})
 				return nil
 			}); err != nil {
+				log.Print(LogDataError(ingestedRouteMsg.RouteID, joinKeyValue, err))
 				PublishRouteStatus(ctx, ingestedRouteMsg.RouteID, processor.Failed, err.Error(), data)
 			}
 		}
