@@ -7,44 +7,40 @@ import (
 // Data represents an incoming JSON event.
 //type Data map[string]interface{}
 
-type DataBySource map[string][]*EventEntry
+type PartsBySource map[string][]*BlockPart
 
-// DataBlock holds events joined by a common key, stored by source.
-type DataBlock struct {
-	key          string
-	dataBySource DataBySource
-	//dataBySource map[string][]models.Data // events organized by their source
-	lastUpdated  time.Time // last update time
-	evictionTime time.Time // updated on every event arrival
-	eventTTL     time.Duration
-	count        int // total events in this block
-	index        int // index in the heap
+// Block holds events joined by a common key, stored by source.
+type Block struct {
+	key           string
+	partsBySource PartsBySource
+	evictionTime  time.Time // updated on every event arrival (sliding window)
+	heapIndex     int       // heapIndex in the heap
 }
 
-// DataBlockHeap implements a min-heap sorted by evictionTime.
-type DataBlockHeap []*DataBlock
+// blockHeap implements a min-heap sorted by evictionTime.
+type blockHeap []*Block
 
-func (h DataBlockHeap) Len() int { return len(h) }
-func (h DataBlockHeap) Less(i, j int) bool {
+func (h blockHeap) Len() int { return len(h) }
+func (h blockHeap) Less(i, j int) bool {
 	return h[i].evictionTime.Before(h[j].evictionTime)
 }
-func (h DataBlockHeap) Swap(i, j int) {
+func (h blockHeap) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
-	h[i].index = i
-	h[j].index = j
+	h[i].heapIndex = i
+	h[j].heapIndex = j
 }
-func (h *DataBlockHeap) Push(x interface{}) {
+func (h *blockHeap) Push(x interface{}) {
 	n := len(*h)
-	item := x.(*DataBlock)
-	item.index = n
+	item := x.(*Block)
+	item.heapIndex = n
 	*h = append(*h, item)
 }
 
-func (h *DataBlockHeap) Pop() interface{} {
+func (h *blockHeap) Pop() interface{} {
 	old := *h         // save the old heap on the stack
 	n := len(old)     // get the length of the old heap from the stack
 	x := old[n-1]     // get the last element from the old heap
-	x.index = -1      // for safety
+	x.heapIndex = -1  // for safety
 	*h = old[0 : n-1] // remove the last element from the old heap
 	return x          // return the last element
 }

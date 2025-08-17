@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestBlock_AddData(t *testing.T) {
+func TestBlockStore_AddData(t *testing.T) {
 	source1 := []models.Data{
 		{
 			"category":              "class_a",
@@ -72,21 +72,22 @@ func TestBlock_AddData(t *testing.T) {
 		{Name: "category"},
 	}
 
-	block := correlate.NewBlock(
+	store := correlate.NewBlockStore(
 		keys,
-		10,
-		10*time.Second,
-		30*time.Second)
+		10,             // blockCountSoftLimit
+		1,              // blockPartMaxJoinCount
+		5*time.Second,  // blockWindowTTL
+		10*time.Second) // blockPartMaxAge
 
-	require.NoError(t, block.AddData("source1", source1[0], func(data models.Data) error {
+	require.NoError(t, store.AddData("source1", source1[0], func(data models.Data) error {
 		return fmt.Errorf("should not happen")
 	}))
 
-	require.NoError(t, block.AddData("source1", source1[1], func(data models.Data) error {
+	require.NoError(t, store.AddData("source1", source1[1], func(data models.Data) error {
 		return fmt.Errorf("should not happen")
 	}))
 
-	require.NoError(t, block.AddData("source2", source2[0], func(data models.Data) error {
+	require.NoError(t, store.AddData("source2", source2[0], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_a")
 		require.Equal(t, data["framework"], "Utilitarian")
@@ -94,7 +95,7 @@ func TestBlock_AddData(t *testing.T) {
 		return nil
 	}))
 
-	require.NoError(t, block.AddData("source2", source2[1], func(data models.Data) error {
+	require.NoError(t, store.AddData("source2", source2[1], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_a")
 		require.Equal(t, data["framework"], "Utilitarian")
@@ -102,7 +103,7 @@ func TestBlock_AddData(t *testing.T) {
 		return nil
 	}))
 
-	require.NoError(t, block.AddData("source2", source2[2], func(data models.Data) error {
+	require.NoError(t, store.AddData("source2", source2[2], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_b")
 		require.Equal(t, data["framework"], "Care Ethicist")
@@ -110,7 +111,7 @@ func TestBlock_AddData(t *testing.T) {
 		return nil
 	}))
 
-	require.NoError(t, block.AddData("source2", source2[3], func(data models.Data) error {
+	require.NoError(t, store.AddData("source2", source2[3], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_b")
 		require.Equal(t, data["framework"], "Care Ethicist")
@@ -118,7 +119,7 @@ func TestBlock_AddData(t *testing.T) {
 		return nil
 	}))
 
-	require.NoError(t, block.AddData("source2", source2[4], func(data models.Data) error {
+	require.NoError(t, store.AddData("source2", source2[4], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_b")
 		require.Equal(t, data["framework"], "Care Ethicist")
@@ -126,7 +127,7 @@ func TestBlock_AddData(t *testing.T) {
 		return nil
 	}))
 
-	require.NoError(t, block.AddData("source2", source2[5], func(data models.Data) error {
+	require.NoError(t, store.AddData("source2", source2[5], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_a")
 		require.Equal(t, data["framework"], "Utilitarian")
@@ -135,21 +136,23 @@ func TestBlock_AddData(t *testing.T) {
 	}))
 }
 
-func TestBlock(t *testing.T) {
+func TestBlockStore(t *testing.T) {
 	// Use "id" as the correlation key field.
-	softMaxThreshold := 10
-	softWindow := 1 * time.Minute
-	hardWindow := 1 * time.Minute
+	blockCountSoftLimit := 10
+	blockPartMaxJoinCount := 1
+	blockWindowTTL := 1 * time.Minute
+	blockPartMaxAge := 5 * time.Second
 
 	keys := state.ColumnKeyDefinitions{
 		{Name: "id"},
 	}
 
-	block := correlate.NewBlock(
+	store := correlate.NewBlockStore(
 		keys,
-		softMaxThreshold,
-		softWindow,
-		hardWindow)
+		blockCountSoftLimit,
+		blockPartMaxJoinCount,
+		blockWindowTTL,
+		blockPartMaxAge)
 
 	dataAppender := func(source string, maxCount int) {
 		minTick := 1 * time.Millisecond
@@ -168,7 +171,7 @@ func TestBlock(t *testing.T) {
 			}
 
 			//
-			require.NoError(t, block.AddData(source, data, func(data models.Data) error {
+			require.NoError(t, store.AddData(source, data, func(data models.Data) error {
 				log.Printf("%+v", data)
 				return nil
 			}))
@@ -193,6 +196,6 @@ func TestBlock(t *testing.T) {
 	// Wait for the data to be processed.
 	time.Sleep(120 * time.Second)
 
-	avg := block.Statistics.Avg()
+	avg := store.Statistics.Avg()
 	fmt.Printf("Average: %d\n", avg)
 }

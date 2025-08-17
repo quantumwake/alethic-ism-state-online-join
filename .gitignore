@@ -1,2 +1,4 @@
-deployment-output.yaml
 .idea
+.claude
+deployment-output.yaml
+

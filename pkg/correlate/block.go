@@ -10,49 +10,59 @@ import (
 	"time"
 )
 
-// Block is the upper-level structure that defines key fields,
-// holds data blocks, and performs join and eviction.
-type Block struct {
-	KeyDefinitions state.ColumnKeyDefinitions // fields defining the correlation key
+// BlockStore is the upper-level structure that defines key fields,
+// holds blocks, and performs join and eviction of entire blocks and individual parts
+type BlockStore struct {
+	JoinKeyDefinitions state.ColumnKeyDefinitions // fields defining the correlation key
 
-	// stop watch for measuring performance of the block
+	// stop watch for measuring performance of the store
 	Statistics *Statistics
 
-	// dataBlocks provides fast lookup by key.
-	dataBlocks map[string]*DataBlock
-	// heap orders the data blocks by evictionTime.
-	heap DataBlockHeap
+	// blocks provides fast lookup by join key.
+	blocks map[string]*Block
+	// heap orders the blocks by evictionTime.
+	heap blockHeap
 
 	mu sync.Mutex
 
-	// Configuration thresholds:
-	softMaxThreshold int           // if total blocks exceed this, soft eviction is applied
-	eventTTL         time.Duration // TTL for individual events
-	softEvictWindow  time.Duration // each event resets evictionTime to now + softEvictWindow
-	hardEvictWindow  time.Duration // absolute lifetime of a data block
+	// Block management configuration
+	blockCountSoftLimit int           // if total blocks exceed this, eviction window will apply
+	blockWindowTTL      time.Duration // sliding window TTL for a block, resets on each new event
+
+	// BlockPart management configuration
+	blockPartMaxJoinCount int           // hard limit on how many times a part can be joined
+	blockPartMaxAge       time.Duration // absolute lifetime of a part from creation
+
+	// Lifecycle management
+	shutdownCh   chan struct{}
+	lastAccessed time.Time
 }
 
-// NewBlock creates a new Block.
-func NewBlock(keyDefinitions state.ColumnKeyDefinitions, softMaxThreshold int, softWindow, hardWindow time.Duration) *Block {
-	cb := &Block{
-		KeyDefinitions:   keyDefinitions,
-		dataBlocks:       make(map[string]*DataBlock),
-		heap:             DataBlockHeap{},
-		softMaxThreshold: softMaxThreshold,
-		eventTTL:         softWindow, // Use softWindow as event TTL
-		softEvictWindow:  softWindow,
-		hardEvictWindow:  hardWindow,
-		Statistics:       NewStopWatch().Start(),
+type KeyedBlock map[string]*Block
+
+// NewBlockStore creates a new BlockStore.
+func NewBlockStore(keyDefinitions state.ColumnKeyDefinitions, blockCountSoftLimit, blockPartMaxJoinCount int, blockWindowTTL, blockPartMaxAge time.Duration) *BlockStore {
+	store := &BlockStore{
+		JoinKeyDefinitions:    keyDefinitions,
+		blocks:                make(KeyedBlock),
+		heap:                  blockHeap{},
+		blockCountSoftLimit:   blockCountSoftLimit,
+		blockPartMaxJoinCount: blockPartMaxJoinCount,
+		blockWindowTTL:        blockWindowTTL,
+		blockPartMaxAge:       blockPartMaxAge,
+		Statistics:            NewStopWatch().Start(),
+		shutdownCh:            make(chan struct{}),
+		lastAccessed:          time.Now(),
 	}
-	heap.Init(&cb.heap)
-	go cb.evictionLoop()
-	return cb
+	heap.Init(&store.heap)
+	go store.evictionLoop()
+	return store
 }
 
-// getKey builds a unique key for an event based on the block's KeyDefinitions.
-func (cb *Block) getKey(event models.Data) (string, error) {
+// GetJoinKeyValue builds a unique key for an event based on the store's JoinKeyDefinitions.
+func (store *BlockStore) GetJoinKeyValue(event models.Data) (string, error) {
 	key := ""
-	for _, field := range cb.KeyDefinitions {
+	for _, field := range store.JoinKeyDefinitions {
 		value, ok := event[field.Name]
 		if !ok {
 			return "", fmt.Errorf("field `%s` not present in event", field.Name)
@@ -64,11 +74,11 @@ func (cb *Block) getKey(event models.Data) (string, error) {
 
 // joinData joins two events from different sources.
 // The key fields are copied as-is, and non-key fields are prefixed with the source identifier.
-func joinData(src1 string, e1 models.Data, src2 string, e2 models.Data, keyDefinitions state.ColumnKeyDefinitions) models.Data {
+func joinData(src1 string, e1 *BlockPart, src2 string, e2 *BlockPart, keyDefinitions state.ColumnKeyDefinitions) models.Data {
 	result := make(models.Data)
 	// Copy key fields from one event (assumed identical in both)
 	for _, field := range keyDefinitions {
-		if v, ok := e1[field.Name]; ok {
+		if v, ok := e1.Data[field.Name]; ok {
 			result[field.Name] = v
 		}
 	}
@@ -95,133 +105,205 @@ func joinData(src1 string, e1 models.Data, src2 string, e2 models.Data, keyDefin
 
 		}
 	}
-	addFields(src1, e1)
-	addFields(src2, e2)
+
+	addFields(src1, e1.Data)
+	addFields(src2, e2.Data)
 	result["joinedAt"] = time.Now().Format(time.RFC3339)
+	e1.JoinCount++ // increase the number of times this data was joined
+	e2.JoinCount++ // increase the number of times this data was joined
 	return result
 }
 
+func (store *BlockStore) EvictExpiredBlocks() {
+	// If concurrent access is possible:
+	// store.mu.Lock()
+	// defer store.mu.Unlock()
+
+	now := time.Now()
+	for store.heap.Len() > 0 {
+		// assuming store.heap is a heap over items with evictionTime
+		// and heapIndex access to the underlying slice is valid here.
+		if store.heap[0].evictionTime.After(now) {
+			break
+		}
+		heap.Pop(&store.heap) // discard returned item
+	}
+}
+
+func (store *BlockStore) GetOrAddBlock(joinKeyValue string) (*Block, error) {
+	//store.mu.Lock()
+	//defer store.mu.Unlock()
+
+	if block, ok := store.blocks[joinKeyValue]; ok {
+		return block, nil
+	}
+
+	now := time.Now()
+	block := &Block{
+		key:           joinKeyValue,
+		partsBySource: make(PartsBySource),
+		evictionTime:  now.Add(store.blockWindowTTL),
+		heapIndex:     -1,
+	}
+
+	store.blocks[joinKeyValue] = block
+	heap.Push(&store.heap, block)
+	return block, nil
+}
+
 // AddData processes an incoming event from a given source. It only joins events from different sources.
-func (cb *Block) AddData(source string, data models.Data, callback func(data models.Data) error) error {
+func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData models.Data, callback func(data models.Data) error) error {
 	stopWatch := NewStopWatch().Start()
 	defer func() { // calculate execution time and add lab statistics
 		elapsed := stopWatch.Stop().Elapsed()
-		cb.Statistics.LapWith(elapsed)
+		store.Statistics.LapWith(elapsed)
 	}()
 
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
+	store.mu.Lock()
+	defer store.mu.Unlock()
 
-	key, err := cb.getKey(data)
+	// Update last accessed time
+	store.lastAccessed = time.Now()
+
+	// given a block (e.g. joinKeyValue-value map, get the value of the joinKeyValue, as defined by this BlockStore)
+	joinKeyValue, err := store.GetJoinKeyValue(inboundSourceData)
 	if err != nil {
-		return fmt.Errorf("could not get key for data %v: %v", data, err)
-	}
-	now := time.Now()
-	db, exists := cb.dataBlocks[key]
-	if !exists {
-		// Create a new data block.
-		db = &DataBlock{
-			key:          key,
-			dataBySource: make(DataBySource),
-			lastUpdated:  now,
-			evictionTime: now.Add(cb.softEvictWindow),
-			eventTTL:     cb.eventTTL,
-			count:        0,
-		}
-		cb.dataBlocks[key] = db
-		heap.Push(&cb.heap, db)
+		return fmt.Errorf("could not get joinKeyValue for source data %v: %v", inboundSourceData, err)
 	}
 
-	// For each event already in the block from a different source, perform a join.
-	for otherSource, events := range db.dataBySource {
-		// Reset TTL for existing events, irrespective of its source
-		// As long as there is new data coming in on the join key value,
-		// we keep all data -- only when there is no longer any data on the
-		// same join key value do we evict the events for this join-key value
-		for _, event := range events {
-			event.Touch()
-		}
+	now := time.Now() // stamps
 
-		if otherSource == source {
+	// Within the store, we maintain a map of blocks - the key is derived from the join key definition.
+	// NOTE: THIS IS AN UNSAFE OPERATION, store.mu.Lock will sync this, however.
+	block, _ := store.GetOrAddBlock(joinKeyValue)
+
+	// we track the inbound data by wrapping it in a block part
+	inboundSourcePart := &BlockPart{
+		Data:      inboundSourceData,
+		ExpireAt:  now.Add(store.blockPartMaxAge),
+		JoinCount: 0,
+	}
+
+	// store the new inbound part
+	block.partsBySource[inboundSourceID] = append(block.partsBySource[inboundSourceID], inboundSourcePart)
+
+	// under the block, we separate out the arrival data by source
+	// this allows us to join the received data (on source) against all other sources
+	for storedSourceID, storedParts := range block.partsBySource {
+		if inboundSourceID == storedSourceID {
 			continue // do not join events from the same source
 		}
 
-		//avg := utils.FormatNanoSeconds(cb.Statistics.Avg())
-		avg := time.Duration(cb.Statistics.Avg()).Seconds()
+		//avg := utils.FormatNanoSeconds(store.Statistics.Avg())
+		avg := time.Duration(store.Statistics.Avg()).Seconds()
 
-		for _, eventEntry := range events {
-			// Skip expired events
-			if now.Sub(eventEntry.LastAccessed) > cb.eventTTL {
-				continue
+		write := 0                               // in-place compaction position
+		for _, storedPart := range storedParts { /// iterate each stored part as per previously stored source
+			// Check if the part is expired (ExpireAt is in the past)
+			expired := storedPart.ExpireAt.Before(now)
+
+			// Check if the part has reached max join count
+			maxJoinsReached := storedPart.JoinCount >= store.blockPartMaxJoinCount
+
+			// Skip this part if either condition is true
+			if expired || maxJoinsReached {
+				continue // note, we do not move write heapIndex forward
 			}
-			joinResult := joinData(otherSource, eventEntry.Data, source, data, cb.KeyDefinitions)
+
+			// if the part is not expired, we need to first make sure we keep it, and then we join it.
+			storedParts[write] = storedPart // in-place overwrite, (e.g. this essentially keeps all stored values at the top of the slice)
+
+			// we join it after we have determined to keep this part.
+			joinResult := joinData(
+				storedSourceID,
+				storedPart,
+				inboundSourceID,
+				inboundSourcePart,
+				store.JoinKeyDefinitions)
+
 			log.Printf("\t%.10f\t%+v\n", avg, joinResult)
 			if err = callback(joinResult); err != nil {
-				return fmt.Errorf("could not process data: %v", err)
+				return fmt.Errorf("could not process availablePart: %v", err)
 			}
+
+			write++ // move write heapIndex forward
 		}
+
+		// now that we have iterated the storedParts and completed any relevant join, we need to compact the list, if any
+		// we do this by essentially taking nilling out any pointers below the write heapIndex of the slice (remember we moved all kept objects up)
+		for index := write; index < len(storedParts); index++ {
+			storedParts[index] = nil // this is such that the GC can finalize these objects
+		}
+		block.partsBySource[storedSourceID] = storedParts[:write] // we then need to shrink the slice appropriately so len == write heapIndex (exclusively)
 	}
 
-	// Create new event entry and add to the block
-	eventEntry := &EventEntry{
-		Data:         data,
-		LastAccessed: now,
-	}
-	db.dataBySource[source] = append(db.dataBySource[source], eventEntry)
-	db.count++
-	db.lastUpdated = now
-
-	// Always reset the block eviction time on each new event (from any source)
-	db.evictionTime = now.Add(cb.softEvictWindow)
-	heap.Fix(&cb.heap, db.index)
+	// Always reset the block eviction time on each new event (sliding window)
+	block.evictionTime = now.Add(store.blockWindowTTL)
+	heap.Fix(&store.heap, block.heapIndex)
 	return nil
 }
 
-// evictionLoop runs periodically to remove stale data blocks.
-// If the total number of data blocks exceeds the soft threshold, blocks whose evictionTime has passed are evicted.
-// Additionally, blocks that have exceeded the hardEvictWindow are removed.
-func (cb *Block) evictionLoop() {
+// Shutdown stops the eviction loop and cleans up resources
+func (store *BlockStore) Shutdown() {
+	store.mu.Lock()
+	blockCount := len(store.blocks)
+	store.mu.Unlock()
+	
+	log.Printf("[BlockStore] Shutting down store with %d active blocks", blockCount)
+	close(store.shutdownCh)
+}
+
+// IsIdle returns true if the store hasn't been accessed for longer than the idle duration
+func (store *BlockStore) IsIdle(idleDuration time.Duration) bool {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return time.Since(store.lastAccessed) > idleDuration
+}
+
+// evictionLoop runs periodically to remove stale blocks.
+// If the total number of blocks exceeds the soft threshold, blocks whose evictionTime has passed are evicted.
+func (store *BlockStore) evictionLoop() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	evictFn := func() {
 		now := time.Now()
 
-		// acquire the lock and check for stale data blocks to evict
-		cb.mu.Lock()
-		defer cb.mu.Unlock()
+		// acquire the lock and check for stale blocks to evict
+		store.mu.Lock()
+		defer store.mu.Unlock()
 
-		// Hard eviction: remove blocks older than hardEvictWindow.
-		for cb.heap.Len() > 0 {
-			db := cb.heap[0] // peek the oldest block
-
-			// if the block is younger than hardEvictWindow, stop hard eviction
-			if db.lastUpdated.Add(cb.hardEvictWindow).After(now) {
-				break
-			}
-
-			heap.Pop(&cb.heap)            // remove the block from the heap
-			delete(cb.dataBlocks, db.key) // remove the block from the map
-			log.Printf("Hard evicting data block with key %s", db.key)
-		}
+		//// Hard eviction: remove blocks older than hardEvictWindow.
+		//for block.heap.Len() > 0 {
+		//	db := block.heap[0] // peek the oldest block
+		//
+		//	// if the block is younger than hardEvictWindow, stop hard eviction
+		//	if db.lastUpdated.Add(block.hardEvictWindow).After(now) {
+		//		break
+		//	}
+		//
+		//	heap.Pop(&block.heap)            // remove the block from the heap
+		//	delete(block.dataBlocks, db.key) // remove the block from the map
+		//	log.Printf("Hard evicting data block with key %s", db.key)
+		//}
 
 		// iterate over the heap
-		for cb.heap.Len() > 0 {
+		for store.heap.Len() > 0 {
 
-			// SoftMaxThreshold: if total number of data blocks not exceeds softMaxThreshold, do not evict any blocks
-			if len(cb.dataBlocks) <= cb.softMaxThreshold {
+			// SoftMaxThreshold: if total number of blocks not exceeds blockCountSoftLimit, do not evict any blocks
+			if len(store.blocks) <= store.blockCountSoftLimit {
 				// the heap will continue to grow until the hard eviction removes the block, OR
-				// the total number of data blocks is greater than softMaxThreshold and the soft
-				// eviction time of the data block has passed
+				// the total number of blocks is greater than blockCountSoftLimit and the soft
+				// eviction time of the block has passed
 				return
 			}
 
 			// Soft eviction: remove blocks whose evictionTime has passed.
-			db := cb.heap[0]
-			if db.evictionTime.Before(now) {
-				heap.Pop(&cb.heap)
-				delete(cb.dataBlocks, db.key)
-				log.Printf("Soft evicting data block with key %s", db.key)
+			blk := store.heap[0]
+			if blk.evictionTime.Before(now) {
+				heap.Pop(&store.heap)
+				delete(store.blocks, blk.key)
+				log.Printf("Soft evicting block with key %s", blk.key)
 			} else {
 				break
 			}
@@ -229,8 +311,13 @@ func (cb *Block) evictionLoop() {
 		}
 	}
 
-	// listen on the ticker channel
-	for range ticker.C {
-		evictFn()
+	// listen on the ticker channel or shutdown signal
+	for {
+		select {
+		case <-ticker.C:
+			evictFn()
+		case <-store.shutdownCh:
+			return
+		}
 	}
 }
