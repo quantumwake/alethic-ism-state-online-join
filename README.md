@@ -15,10 +15,12 @@ This service functions as a streaming data processor that:
 
 ### Key Features
 - **Real-time Processing**: Processes events as they arrive with minimal latency
-- **Sliding Window Cache**: Maintains temporal context for joining events
+- **Per-Event TTL Eviction**: Individual event time-to-live management for precise cache control
+- **Sliding Window Cache**: Maintains temporal context for joining events with configurable windows
 - **Cross-source Joining**: Prevents self-joins by only correlating events from different sources
 - **Configurable Join Keys**: Flexible key definitions for different correlation scenarios
 - **Performance Monitoring**: Built-in statistics tracking and performance metrics
+- **Dual Eviction Policies**: Soft and hard eviction windows for optimal memory management
 
 ## Architecture
 
@@ -35,11 +37,14 @@ This service functions as a streaming data processor that:
 
 #### 2. Join Processing Engine (`pkg/correlate/block.go`)
 The core joining logic implements:
-- **Sliding Window Cache** with dual eviction policies:
-  - Soft window (1 minute): Active joining period
-  - Hard window (1 minute): Maximum data retention and cache flush period
+- **Per-Event TTL Management**: Each event maintains its own time-to-live for granular eviction control
+- **Sliding Window Cache** with enhanced eviction policies:
+  - Per-event TTL: Individual event lifecycle management
+  - Soft window (configurable, default 1 minute): Active joining period
+  - Hard window (configurable, default 1 minute): Maximum data retention and cache flush period
 - **Key-based Correlation**: Extracts and matches events using configured key fields
-- **Efficient Memory Management**: Automatic cache eviction based on time and capacity
+- **Efficient Memory Management**: Automatic cache eviction based on per-event TTL and capacity
+- **Block Partitioning**: New `blockpart.go` for improved cache block organization
 
 #### 3. Data Persistence Layer
 - **PostgreSQL Backend**: Uses GORM ORM for database operations
@@ -80,9 +85,20 @@ The join algorithm operates as follows:
 6. **Timer Reset**: Reset eviction timers for the block
 
 ### Cache Eviction Strategy
-- **Soft Eviction**: When total blocks exceed threshold (10), remove blocks past soft window (1 minute)
-- **Hard Eviction**: Remove any blocks older than hard window (1 minute)
-- **Performance Impact**: All cache blocks are flushed after 1 minute to ensure timely data processing
+
+The service now implements a sophisticated per-event TTL eviction mechanism:
+
+#### Per-Event TTL
+- **Individual Event Lifecycle**: Each event tracks its own creation time and TTL
+- **Granular Control**: Events can be evicted independently based on their specific TTL
+- **Memory Optimization**: Prevents stale events from consuming memory unnecessarily
+
+#### Eviction Policies
+- **Per-Event Eviction**: Events are automatically removed when their individual TTL expires
+- **Soft Eviction**: When total blocks exceed threshold (configurable, default 10), remove blocks with expired events
+- **Hard Eviction**: Force removal of any blocks older than hard window (configurable, default 1 minute)
+- **Automatic Cleanup**: Background process continuously monitors and evicts expired events
+- **Performance Impact**: Improved memory efficiency through granular eviction control
 
 ## Configuration
 
@@ -105,8 +121,30 @@ Configurable per state output, allowing flexible correlation strategies:
 ```yaml
 join_keys:
   - field: "user_id"
+    ttl: 30s  # Optional: per-key TTL override
   - field: "session_id"
+    ttl: 60s  # Optional: per-key TTL override
   - field: "correlation_id"
+    ttl: 120s # Optional: per-key TTL override
+```
+
+### Event TTL Configuration
+Configure time-to-live for events at multiple levels:
+```yaml
+# Global default TTL
+default_event_ttl: 60s
+
+# Per-route TTL override
+routes:
+  - name: "high_priority_join"
+    event_ttl: 30s  # Shorter TTL for high-priority events
+  - name: "batch_processing"
+    event_ttl: 300s # Longer TTL for batch operations
+
+# Per-event TTL (set in event metadata)
+event:
+  metadata:
+    ttl: "45s"  # Event-specific TTL override
 ```
 
 ## Deployment
@@ -153,10 +191,13 @@ This service is designed for:
 ## Performance Considerations
 
 ### Optimization Features
-- Efficient in-memory caching with automatic eviction
+- Per-event TTL for precise memory management
+- Efficient in-memory caching with granular automatic eviction
 - Parallel processing capabilities
 - Minimal data copying during join operations
 - Performance statistics tracking
+- Improved cache block partitioning for faster lookups
+- Reduced memory footprint through aggressive expired event cleanup
 
 ### Scalability Notes
 - Horizontal scaling supported through NATS partitioning
@@ -188,6 +229,14 @@ The service provides:
 - Error tracking and logging
 - Health check endpoints for orchestration
 
+## Recent Enhancements
+
+### Per-Event TTL Eviction (v2.0.0)
+- Implemented granular per-event time-to-live management
+- Added configurable TTL at global, route, and event levels
+- Improved memory efficiency through precise eviction control
+- Enhanced cache block partitioning with new `blockpart.go` module
+
 ## Future Enhancements
 
 Based on code comments and structure:
@@ -195,6 +244,8 @@ Based on code comments and structure:
 - Advanced join strategies (outer joins, conditional joins)
 - Enhanced performance monitoring and tracing
 - Support for larger correlation windows
+- Dynamic TTL adjustment based on system load
+- Event priority-based eviction policies
 
 ## License
 
