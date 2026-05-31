@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/quantumwake/alethic-ism-core-go/pkg/repository/state"
 	"strings"
-	"time"
 )
 
 // FormatJoinKeyDefinitions formats join key definitions for logging
@@ -21,16 +20,18 @@ func FormatJoinKeyDefinitions(keyDefs state.ColumnKeyDefinitions) string {
 	return strings.Join(parts, ", ")
 }
 
-// LogBlockStoreConfig logs the configuration when creating a new BlockStore
+// LogBlockStoreConfig logs the structural configuration when creating a new BlockStore.
+// Per-event knobs (window TTL, part max age, max join count) are supplied per message via
+// CacheControlContext and are not part of the store.
 func LogBlockStoreConfig(routeID, stateID, processorID string, joinKeys state.ColumnKeyDefinitions,
-	blockCountSoftLimit int, blockWindowTTL time.Duration, blockPartMaxJoinCount int, blockPartMaxAge time.Duration) {
-	
+	blockCountSoftLimit int) {
+
 	joinKeyStr := FormatJoinKeyDefinitions(joinKeys)
-	
-	fmt.Printf("[Handler] Creating new BlockStore for route: %s (state: %s, processor: %s)\n", 
+
+	fmt.Printf("[Handler] Creating new BlockStore for route: %s (state: %s, processor: %s)\n",
 		routeID, stateID, processorID)
-	fmt.Printf("[Handler] BlockStore config - JoinKeys: [%s] | CountSoftLimit: %d | WindowTTL: %v | PartMaxJoinCount: %d | PartMaxAge: %v\n",
-		joinKeyStr, blockCountSoftLimit, blockWindowTTL, blockPartMaxJoinCount, blockPartMaxAge)
+	fmt.Printf("[Handler] BlockStore config - JoinKeys: [%s] | CountSoftLimit: %d\n",
+		joinKeyStr, blockCountSoftLimit)
 }
 
 // LogProcessingData logs when data is being processed through the join handler

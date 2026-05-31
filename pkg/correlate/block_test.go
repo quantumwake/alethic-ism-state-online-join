@@ -72,22 +72,22 @@ func TestBlockStore_AddData(t *testing.T) {
 		{Name: "category"},
 	}
 
-	store := correlate.NewBlockStore(
-		keys,
-		10,             // blockCountSoftLimit
-		1,              // blockPartMaxJoinCount
-		5*time.Second,  // blockWindowTTL
-		10*time.Second) // blockPartMaxAge
+	store := correlate.NewBlockStore(keys, 10)
+	ccc := correlate.CacheControlContext{
+		BlockPartMaxJoinCount: 1,
+		BlockWindowTTL:        5 * time.Second,
+		BlockPartMaxAge:       10 * time.Second,
+	}
 
-	require.NoError(t, store.AddData("source1", source1[0], func(data models.Data) error {
+	require.NoError(t, store.AddData(ccc, "source1", source1[0], func(data models.Data) error {
 		return fmt.Errorf("should not happen")
 	}))
 
-	require.NoError(t, store.AddData("source1", source1[1], func(data models.Data) error {
+	require.NoError(t, store.AddData(ccc, "source1", source1[1], func(data models.Data) error {
 		return fmt.Errorf("should not happen")
 	}))
 
-	require.NoError(t, store.AddData("source2", source2[0], func(data models.Data) error {
+	require.NoError(t, store.AddData(ccc, "source2", source2[0], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_a")
 		require.Equal(t, data["framework"], "Utilitarian")
@@ -95,7 +95,7 @@ func TestBlockStore_AddData(t *testing.T) {
 		return nil
 	}))
 
-	require.NoError(t, store.AddData("source2", source2[1], func(data models.Data) error {
+	require.NoError(t, store.AddData(ccc, "source2", source2[1], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_a")
 		require.Equal(t, data["framework"], "Utilitarian")
@@ -103,7 +103,7 @@ func TestBlockStore_AddData(t *testing.T) {
 		return nil
 	}))
 
-	require.NoError(t, store.AddData("source2", source2[2], func(data models.Data) error {
+	require.NoError(t, store.AddData(ccc, "source2", source2[2], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_b")
 		require.Equal(t, data["framework"], "Care Ethicist")
@@ -111,7 +111,7 @@ func TestBlockStore_AddData(t *testing.T) {
 		return nil
 	}))
 
-	require.NoError(t, store.AddData("source2", source2[3], func(data models.Data) error {
+	require.NoError(t, store.AddData(ccc, "source2", source2[3], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_b")
 		require.Equal(t, data["framework"], "Care Ethicist")
@@ -119,7 +119,7 @@ func TestBlockStore_AddData(t *testing.T) {
 		return nil
 	}))
 
-	require.NoError(t, store.AddData("source2", source2[4], func(data models.Data) error {
+	require.NoError(t, store.AddData(ccc, "source2", source2[4], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_b")
 		require.Equal(t, data["framework"], "Care Ethicist")
@@ -127,7 +127,7 @@ func TestBlockStore_AddData(t *testing.T) {
 		return nil
 	}))
 
-	require.NoError(t, store.AddData("source2", source2[5], func(data models.Data) error {
+	require.NoError(t, store.AddData(ccc, "source2", source2[5], func(data models.Data) error {
 		fmt.Printf("%+v\n", data)
 		require.Equal(t, data["category"], "class_a")
 		require.Equal(t, data["framework"], "Utilitarian")
@@ -147,12 +147,12 @@ func TestBlockStore(t *testing.T) {
 		{Name: "id"},
 	}
 
-	store := correlate.NewBlockStore(
-		keys,
-		blockCountSoftLimit,
-		blockPartMaxJoinCount,
-		blockWindowTTL,
-		blockPartMaxAge)
+	store := correlate.NewBlockStore(keys, blockCountSoftLimit)
+	ccc := correlate.CacheControlContext{
+		BlockPartMaxJoinCount: blockPartMaxJoinCount,
+		BlockWindowTTL:        blockWindowTTL,
+		BlockPartMaxAge:       blockPartMaxAge,
+	}
 
 	dataAppender := func(source string, maxCount int) {
 		minTick := 1 * time.Millisecond
@@ -171,7 +171,7 @@ func TestBlockStore(t *testing.T) {
 			}
 
 			//
-			require.NoError(t, store.AddData(source, data, func(data models.Data) error {
+			require.NoError(t, store.AddData(ccc, source, data, func(data models.Data) error {
 				log.Printf("%+v", data)
 				return nil
 			}))

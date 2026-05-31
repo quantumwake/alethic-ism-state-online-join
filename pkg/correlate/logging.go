@@ -96,14 +96,13 @@ func LogNewBlockCreated(joinKey string, evictionTime time.Time, windowTTL time.D
 		joinKey, evictionTime.Format(time.RFC3339), windowTTL, totalBlocks, softLimit)
 }
 
-// LogBlockStoreCreated logs when a new BlockStore is created
-func LogBlockStoreCreated(keyDefs state.ColumnKeyDefinitions, blockCountSoftLimit, blockPartMaxJoinCount int,
-	blockWindowTTL, blockPartMaxAge time.Duration) string {
-	
+// LogBlockStoreCreated logs when a new BlockStore is created. Per-event knobs are supplied
+// per call via CacheControlContext and are not part of the store's identity.
+func LogBlockStoreCreated(keyDefs state.ColumnKeyDefinitions, blockCountSoftLimit int) string {
 	keyDefStr := FormatKeyDefinitions(keyDefs)
-	
-	return fmt.Sprintf("[BlockStore] Created new store - JoinKeys: [%s] | BlockCountSoftLimit: %d | BlockWindowTTL: %v | PartMaxJoinCount: %d | PartMaxAge: %v",
-		keyDefStr, blockCountSoftLimit, blockWindowTTL, blockPartMaxJoinCount, blockPartMaxAge)
+
+	return fmt.Sprintf("[BlockStore] Created new store - JoinKeys: [%s] | BlockCountSoftLimit: %d",
+		keyDefStr, blockCountSoftLimit)
 }
 
 // LogBlockStoreShutdown logs when a BlockStore is shutting down

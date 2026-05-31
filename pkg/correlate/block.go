@@ -25,13 +25,10 @@ type BlockStore struct {
 
 	mu sync.Mutex
 
-	// Block management configuration
-	blockCountSoftLimit int           // if total blocks exceed this, eviction window will apply
-	blockWindowTTL      time.Duration // sliding window TTL for a block, resets on each new event
-
-	// BlockPart management configuration
-	blockPartMaxJoinCount int           // hard limit on how many times a part can be joined
-	blockPartMaxAge       time.Duration // absolute lifetime of a part from creation
+	// Core cache limit (system/operator-controlled, NOT per-processor): if total blocks
+	// exceed this, the sliding-window eviction applies. The per-event knobs (window TTL,
+	// part max age, max join count) are supplied per call via CacheControlContext.
+	blockCountSoftLimit int
 
 	// Lifecycle management
 	shutdownCh   chan struct{}
@@ -40,23 +37,22 @@ type BlockStore struct {
 
 type KeyedBlock map[string]*Block
 
-// NewBlockStore creates a new BlockStore.
-func NewBlockStore(keyDefinitions state.ColumnKeyDefinitions, blockCountSoftLimit, blockPartMaxJoinCount int, blockWindowTTL, blockPartMaxAge time.Duration) *BlockStore {
+// NewBlockStore creates a new BlockStore. Per-event knobs (window TTL, part max age, max
+// join count) are NOT stored here; they are supplied per call via CacheControlContext.
+// Only the structural join keys and the system block-count soft limit are fixed here.
+func NewBlockStore(keyDefinitions state.ColumnKeyDefinitions, blockCountSoftLimit int) *BlockStore {
 	store := &BlockStore{
-		JoinKeyDefinitions:    keyDefinitions,
-		blocks:                make(KeyedBlock),
-		heap:                  blockHeap{},
-		blockCountSoftLimit:   blockCountSoftLimit,
-		blockPartMaxJoinCount: blockPartMaxJoinCount,
-		blockWindowTTL:        blockWindowTTL,
-		blockPartMaxAge:       blockPartMaxAge,
-		Statistics:            NewStopWatch().Start(),
-		shutdownCh:            make(chan struct{}),
-		lastAccessed:          time.Now(),
+		JoinKeyDefinitions:  keyDefinitions,
+		blocks:              make(KeyedBlock),
+		heap:                blockHeap{},
+		blockCountSoftLimit: blockCountSoftLimit,
+		Statistics:          NewStopWatch().Start(),
+		shutdownCh:          make(chan struct{}),
+		lastAccessed:        time.Now(),
 	}
-	
-	log.Print(LogBlockStoreCreated(keyDefinitions, blockCountSoftLimit, blockPartMaxJoinCount, blockWindowTTL, blockPartMaxAge))
-	
+
+	log.Print(LogBlockStoreCreated(keyDefinitions, blockCountSoftLimit))
+
 	heap.Init(&store.heap)
 	go store.evictionLoop()
 	return store
@@ -133,7 +129,7 @@ func (store *BlockStore) EvictExpiredBlocks() {
 	}
 }
 
-func (store *BlockStore) GetOrAddBlock(joinKeyValue string) (*Block, error) {
+func (store *BlockStore) GetOrAddBlock(joinKeyValue string, blockWindowTTL time.Duration) (*Block, error) {
 	//store.mu.Lock()
 	//defer store.mu.Unlock()
 
@@ -145,21 +141,38 @@ func (store *BlockStore) GetOrAddBlock(joinKeyValue string) (*Block, error) {
 	block := &Block{
 		key:           joinKeyValue,
 		partsBySource: make(PartsBySource),
-		evictionTime:  now.Add(store.blockWindowTTL),
+		evictionTime:  now.Add(blockWindowTTL),
 		heapIndex:     -1,
 	}
 
 	store.blocks[joinKeyValue] = block
 	heap.Push(&store.heap, block)
-	
-	log.Print(LogNewBlockCreated(joinKeyValue, block.evictionTime, store.blockWindowTTL, 
+
+	log.Print(LogNewBlockCreated(joinKeyValue, block.evictionTime, blockWindowTTL,
 		len(store.blocks), store.blockCountSoftLimit))
-	
+
 	return block, nil
 }
 
-// AddData processes an incoming event from a given source. It only joins events from different sources.
-func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData models.Data, callback func(data models.Data) error) error {
+// distinctLiveSources counts how many distinct sources currently have at least one
+// non-expired part in the block. Used for the minimum-source gate.
+func distinctLiveSources(block *Block, now time.Time) int {
+	count := 0
+	for _, parts := range block.partsBySource {
+		for _, p := range parts {
+			if p.ExpireAt.After(now) {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
+// AddData processes an incoming event from a given source, using the per-message knobs in
+// ccc (resolved from the routed-to processor's properties). It only joins events from
+// different sources.
+func (store *BlockStore) AddData(ccc CacheControlContext, inboundSourceID string, inboundSourceData models.Data, callback func(data models.Data) error) error {
 	stopWatch := NewStopWatch().Start()
 	defer func() { // calculate execution time and add lab statistics
 		elapsed := stopWatch.Stop().Elapsed()
@@ -182,12 +195,12 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 
 	// Within the store, we maintain a map of blocks - the key is derived from the join key definition.
 	// NOTE: THIS IS AN UNSAFE OPERATION, store.mu.Lock will sync this, however.
-	block, _ := store.GetOrAddBlock(joinKeyValue)
+	block, _ := store.GetOrAddBlock(joinKeyValue, ccc.BlockWindowTTL)
 
 	// we track the inbound data by wrapping it in a block part
 	inboundSourcePart := &BlockPart{
 		Data:      inboundSourceData,
-		ExpireAt:  now.Add(store.blockPartMaxAge),
+		ExpireAt:  now.Add(ccc.BlockPartMaxAge),
 		JoinCount: 0,
 	}
 
@@ -198,7 +211,17 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 	existingParts := len(block.partsBySource[inboundSourceID]) - 1
 	totalSourcesInBlock := len(block.partsBySource)
 	log.Print(LogNewPartAdded(joinKeyValue, inboundSourceID, existingParts, totalSourcesInBlock,
-		inboundSourcePart.ExpireAt, store.blockPartMaxAge))
+		inboundSourcePart.ExpireAt, ccc.BlockPartMaxAge))
+
+	// Minimum-source gate: do not emit until the key has at least MinSources distinct
+	// sources with live parts (configurable per processor; floor of 2 applied upstream).
+	// MinSources <= 0 disables the gate. Keep sliding the window so partial data persists
+	// while waiting for additional sources to arrive.
+	if ccc.MinSources > 0 && distinctLiveSources(block, now) < ccc.MinSources {
+		block.evictionTime = now.Add(ccc.BlockWindowTTL)
+		heap.Fix(&store.heap, block.heapIndex)
+		return nil
+	}
 
 	// under the block, we separate out the arrival data by source
 	// this allows us to join the received data (on source) against all other sources
@@ -217,8 +240,10 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 			// Check if the part is expired (ExpireAt is in the past)
 			expired := storedPart.ExpireAt.Before(now)
 
-			// Check if the part has reached max join count
-			maxJoinsReached := storedPart.JoinCount >= store.blockPartMaxJoinCount
+			// Check if the part has reached max join count.
+			// A non-positive BlockPartMaxJoinCount means "unlimited" (full N:M inner
+			// join within the window); the part is then bounded only by age/window eviction.
+			maxJoinsReached := ccc.BlockPartMaxJoinCount > 0 && storedPart.JoinCount >= ccc.BlockPartMaxJoinCount
 
 			// Skip this part if either condition is true
 			if expired || maxJoinsReached {
@@ -244,7 +269,7 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 
 			log.Print(LogJoinOperation(joinKeyValue, store.JoinKeyDefinitions, joinResult,
 				storedSourceID, inboundSourceID, storedPart, inboundSourcePart,
-				store.blockPartMaxJoinCount, time.Duration(store.Statistics.Avg())))
+				ccc.BlockPartMaxJoinCount, time.Duration(store.Statistics.Avg())))
 			if err = callback(joinResult); err != nil {
 				return fmt.Errorf("could not process availablePart: %v", err)
 			}
@@ -254,8 +279,8 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 
 		// Log if parts were skipped
 		if skippedExpired > 0 || skippedMaxJoins > 0 {
-			log.Print(LogPartSkipped(joinKeyValue, storedSourceID, skippedExpired, skippedMaxJoins, 
-				write, store.blockPartMaxAge, store.blockPartMaxJoinCount))
+			log.Print(LogPartSkipped(joinKeyValue, storedSourceID, skippedExpired, skippedMaxJoins,
+				write, ccc.BlockPartMaxAge, ccc.BlockPartMaxJoinCount))
 		}
 
 		// now that we have iterated the storedParts and completed any relevant join, we need to compact the list, if any
@@ -267,7 +292,7 @@ func (store *BlockStore) AddData(inboundSourceID string, inboundSourceData model
 	}
 
 	// Always reset the block eviction time on each new event (sliding window)
-	block.evictionTime = now.Add(store.blockWindowTTL)
+	block.evictionTime = now.Add(ccc.BlockWindowTTL)
 	heap.Fix(&store.heap, block.heapIndex)
 	return nil
 }

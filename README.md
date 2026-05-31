@@ -43,17 +43,29 @@ A Go microservice that performs real-time event correlation and joining within t
 ## Configuration
 
 ### Environment Variables
-- `DSN`: PostgreSQL connection string
+- `DSN`: PostgreSQL connection string (route/processor/state lookups)
+- `ROUTING_FILE`: NATS routing config (`.routing.yaml`); in k8s mounted from `alethic-ism-routes-secret`
+- `BACKEND_CACHE_TTL` (optional, default `30s`): TTL for the local DB metadata cache
+- `BLOCK_STORE_IDLE_TTL` (optional, default `2h`): idle eviction for per-output-state join caches
+- `BLOCK_STORE_CLEANUP_INTERVAL` (optional, default `5m`): idle-store sweep cadence
+- `BLOCK_COUNT_SOFT_LIMIT` (optional, default `10`): max blocks per store before eviction (memory guard)
+- `MAX_RETENTION` (optional, default `24h`): ceiling clamping per-processor retention knobs (`blockWindowTTL`, `blockPartMaxAge`)
 
 ### Processor Properties
 ```json
 {
   "blockCountSoftLimit": 10,
   "blockWindowTTL": "1m",
-  "blockPartMaxJoinCount": 100,
+  "blockPartMaxJoinCount": 1,
   "blockPartMaxAge": "15s"
 }
 ```
+
+> These are the code defaults applied when a property is absent (`pkg/handler/handler_join.go`).
+> `blockPartMaxJoinCount: 1` means a stored part is joined once and then dropped — i.e. a
+> one-time join. Increase it for repeated / fan-out joins (bounded by `blockPartMaxAge`).
+> See [`docs/architecture.md`](docs/architecture.md#3-caching-lru--eviction) for the full
+> caching / eviction model and diagrams.
 
 ## Eviction Strategy
 

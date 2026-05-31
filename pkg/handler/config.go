@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"alethic-ism-state-online-join/pkg/correlate"
 	"encoding/json"
 	"fmt"
 	"github.com/quantumwake/alethic-ism-core-go/pkg/data"
@@ -9,20 +10,83 @@ import (
 	"time"
 )
 
-// getProcessorJoinConfig fetches and parses the join window configuration from processor properties
-func getProcessorJoinConfig(processorID string) (*join.WindowConfig, error) {
-	// Fetch processor from database
+// resolveCacheControl builds the per-message CacheControlContext for the processor the
+// inbound message is routed to. Window config is read from the processor's properties
+// (defaults applied), then retention values are clamped by the system MAX_RETENTION ceiling.
+// This runs per message (served from the backend metadata cache), so a properties edit
+// takes effect within BACKEND_CACHE_TTL without rebuilding the BlockStore.
+func resolveCacheControl(processorID string) correlate.CacheControlContext {
+	cfg := join.DefaultWindowConfig()
+	minSources := DefaultMinSources
+
 	proc, err := processorBackend.FindProcessorByID(processorID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch processor %s: %v", processorID, err)
+		log.Printf("[Handler] cache-control: processor %s lookup failed, using defaults: %v", processorID, err)
+	} else {
+		if c, perr := parseWindowConfig(proc.Properties); perr != nil {
+			log.Printf("[Handler] cache-control: window config parse failed for %s, using defaults: %v", processorID, perr)
+		} else {
+			cfg = c
+		}
+		minSources = intFromProperties(proc.Properties, "minSources", DefaultMinSources)
 	}
 
-	// Parse configuration from properties
-	config, err := parseWindowConfig(proc.Properties)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse window config: %v", err)
+	// Floor: a join needs at least two distinct sources.
+	if minSources < DefaultMinSources {
+		minSources = DefaultMinSources
 	}
-	return config, nil
+
+	windowTTL := clampRetention(parseDurationWithDefault(derefString(cfg.BlockWindowTTL, "1m"), time.Minute))
+	maxAge := clampRetention(parseDurationWithDefault(derefString(cfg.BlockPartMaxAge, "15s"), 15*time.Second))
+
+	maxJoin := 1 // default: one-to-one
+	if cfg.BlockPartMaxJoinCount != nil {
+		maxJoin = *cfg.BlockPartMaxJoinCount
+	}
+
+	return correlate.CacheControlContext{
+		ProcessorID:           processorID,
+		BlockWindowTTL:        windowTTL,
+		BlockPartMaxAge:       maxAge,
+		BlockPartMaxJoinCount: maxJoin,
+		MinSources:            minSources,
+	}
+}
+
+// clampRetention bounds a retention duration by the system MAX_RETENTION ceiling so a
+// processor can't pin data in memory indefinitely.
+func clampRetention(d time.Duration) time.Duration {
+	if systemMaxRetention > 0 && d > systemMaxRetention {
+		log.Printf("[Handler] retention %v exceeds %s=%v; clamping to ceiling", d, EnvMaxRetention, systemMaxRetention)
+		return systemMaxRetention
+	}
+	return d
+}
+
+// derefString returns *s when set and non-empty, otherwise def.
+func derefString(s *string, def string) string {
+	if s != nil && *s != "" {
+		return *s
+	}
+	return def
+}
+
+// intFromProperties reads an int-valued property from a processor's Properties JSON,
+// falling back to def when absent or not a number. (JSON numbers decode to float64.)
+func intFromProperties(props *data.JSON, key string, def int) int {
+	if props == nil || *props == nil {
+		return def
+	}
+	switch n := (*props)[key].(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	default:
+		return def
+	}
 }
 
 // parseWindowConfig extracts window configuration from processor properties using JSON unmarshaling
