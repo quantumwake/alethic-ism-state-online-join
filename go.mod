@@ -3,7 +3,7 @@ module alethic-ism-state-online-join
 go 1.25.0
 
 require (
-	github.com/quantumwake/alethic-ism-core-go v0.1.30
+	github.com/quantumwake/alethic-ism-core-go v0.1.31
 	github.com/stretchr/testify v1.11.1
 )
 

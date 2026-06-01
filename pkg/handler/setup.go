@@ -97,9 +97,10 @@ func SetupCachedBackend() error {
 	// env because this is intentionally a local cache (no central cache yet); per-tenant /
 	// per-project scoping is a future concern.
 	ttl := durationFromEnv(EnvBackendCacheTTL, DefaultBackendCacheTTL)
-	backendCache = cache.NewLocalCache(&cache.Config{
-		DefaultTTL: ttl,
-	})
+	// Use NewConfigWithTTL (not a partial &Config{DefaultTTL: ttl}) so CleanupDurationInterval
+	// is populated. A bare literal leaves it at 0, and since NewLocalCache only falls back to
+	// defaults when the whole config is nil, time.NewTicker(0) in cleanupExpired panics at startup.
+	backendCache = cache.NewLocalCache(cache.NewConfigWithTTL(ttl))
 	log.Printf("[Setup] backend metadata cache TTL: %v (env %s)", ttl, EnvBackendCacheTTL)
 
 	baseTTL := backendCache.GetDefaultTTL()
