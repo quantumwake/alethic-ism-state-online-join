@@ -6,6 +6,7 @@ import (
 	"github.com/quantumwake/alethic-ism-core-go/pkg/data/models"
 	"github.com/quantumwake/alethic-ism-core-go/pkg/repository/state"
 	"log"
+	"sort"
 	"sync"
 	"time"
 )
@@ -41,6 +42,20 @@ type KeyedBlock map[string]*Block
 // join count) are NOT stored here; they are supplied per call via CacheControlContext.
 // Only the structural join keys and the system block-count soft limit are fixed here.
 func NewBlockStore(keyDefinitions state.ColumnKeyDefinitions, blockCountSoftLimit int) *BlockStore {
+	// Canonicalize the join key order. FindStateConfigKeyDefinitionsByType has no ORDER BY,
+	// so Postgres can return the same set of keys in different orders across queries/restarts
+	// (observed: [seed_id, policy_candidate_provider, run_id] vs [seed_id, run_id, policy_candidate_provider]).
+	// GetJoinKeyValue composes the block key positionally, so an unstable order would compose
+	// different key strings for the same logical event, splitting it across blocks and silently
+	// dropping joins. Sort by name (copy, since the slice may be backed by core-go's cache) so
+	// the composed key is deterministic regardless of DB return order.
+	sortedKeyDefinitions := make(state.ColumnKeyDefinitions, len(keyDefinitions))
+	copy(sortedKeyDefinitions, keyDefinitions)
+	sort.Slice(sortedKeyDefinitions, func(i, j int) bool {
+		return sortedKeyDefinitions[i].Name < sortedKeyDefinitions[j].Name
+	})
+	keyDefinitions = sortedKeyDefinitions
+
 	store := &BlockStore{
 		JoinKeyDefinitions:  keyDefinitions,
 		blocks:              make(KeyedBlock),

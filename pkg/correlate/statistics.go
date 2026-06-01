@@ -54,6 +54,9 @@ func (sw *Statistics) LapWith(elapsed int64) {
 //}
 
 func (sw *Statistics) Avg() int64 {
+	if sw.count == 0 {
+		return 0 // no laps recorded yet (e.g. shutdown of a store that processed no events)
+	}
 	return sw.sum / sw.count
 }
 
