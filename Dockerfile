@@ -1,30 +1,31 @@
-# Start from the latest golang base image
-FROM golang:1.24
+# Build stage
+FROM golang:1.25-alpine AS builder
 
-# Set up environment variables
 ARG GIT_USERNAME
 ARG GIT_TOKEN
 
-# Create a .netrc file to store Git credentials
+RUN apk add --no-cache git sed
+
 RUN echo -e "machine github.com\nlogin $GIT_USERNAME\npassword $GIT_TOKEN" > ~/.netrc
 
-# Set the Current Working Directory inside the container
 WORKDIR /app
 
-# Copy go mod and sum files
 COPY go.mod go.sum ./
-
-# Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
 RUN go mod download
 
-# Copy the source from the current directory to the Working Directory inside the container
 COPY . .
 
-# Build the Go app
-RUN go build -o main .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o main .
 
-# Expose port 8080 to the outside world
+# Runtime stage
+FROM alpine:3
+
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+
+COPY --from=builder /app/main .
+
 EXPOSE 8080
 
-# Command to run the executable
 CMD ["./main"]

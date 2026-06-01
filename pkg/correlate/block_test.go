@@ -12,6 +12,45 @@ import (
 	"time"
 )
 
+// TestBlockStore_JoinKeyOrderIndependence verifies that the composed join key is
+// deterministic regardless of the order in which the join key definitions are supplied.
+// FindStateConfigKeyDefinitionsByType (core-go) has no ORDER BY, so Postgres can return the
+// same set of keys in different orders across queries/restarts. Without canonicalization, the
+// same logical event composes different block keys (e.g. seed-001|run|provider| vs
+// seed-001|provider|run|), splitting it across blocks and silently dropping joins.
+func TestBlockStore_JoinKeyOrderIndependence(t *testing.T) {
+	event := models.Data{
+		"seed_id":                   "seed-001",
+		"run_id":                    "48c2582b",
+		"policy_candidate_provider": "openrouter.google/gemini-2.5-flash",
+		"non_key_field":             "ignored",
+	}
+
+	orderingA := state.ColumnKeyDefinitions{
+		{Name: "seed_id"},
+		{Name: "run_id"},
+		{Name: "policy_candidate_provider"},
+	}
+	orderingB := state.ColumnKeyDefinitions{
+		{Name: "seed_id"},
+		{Name: "policy_candidate_provider"},
+		{Name: "run_id"},
+	}
+
+	storeA := correlate.NewBlockStore(orderingA, 10)
+	storeB := correlate.NewBlockStore(orderingB, 10)
+	defer storeA.Shutdown()
+	defer storeB.Shutdown()
+
+	keyA, errA := storeA.GetJoinKeyValue(event)
+	keyB, errB := storeB.GetJoinKeyValue(event)
+	require.NoError(t, errA)
+	require.NoError(t, errB)
+
+	require.Equal(t, keyA, keyB,
+		"join key must be order-independent so the same logical event lands in the same block")
+}
+
 func TestBlockStore_AddData(t *testing.T) {
 	source1 := []models.Data{
 		{
