@@ -19,7 +19,7 @@ build:
 version:
 	@echo "Bumping patch version..."
 	@git fetch --tags
-	@LATEST_TAG=$$(git describe --tags --abbrev=0 2>/dev/null || echo ""); \
+	@LATEST_TAG=$$(git tag --sort=-v:refname | head -n1); \
 	if [[ -z "$$LATEST_TAG" ]]; then \
 		MAJOR=0; MINOR=1; PATCH=0; \
 		OLD_TAG="<none>"; \
